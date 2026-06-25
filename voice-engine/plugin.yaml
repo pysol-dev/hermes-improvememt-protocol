@@ -1,0 +1,6 @@
+name: voice-engine
+version: 0.1.0
+description: "Local-first Hermes voice middleware: spoken briefs, TTS sanitization, and voice reply policy."
+author: "pysol-dev"
+hooks:
+  - transform_tts_text
