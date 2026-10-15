@@ -136,6 +136,16 @@ def parse_public(text):
             'public key comment must be printable ASCII')
     return fingerprint(blob), 'ssh-ed25519 ' + fields[1] + ((' ' + comment) if comment else ''), comment
 
+def bitwarden_socket_paths():
+    """Documented desktop-agent socket paths; never accept an arbitrary agent as Bitwarden."""
+    paths = [home() / '.bitwarden-ssh-agent.sock']
+    if sys.platform == 'darwin':
+        paths.append(home() / 'Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock')
+    elif sys.platform == 'linux':
+        paths.extend((home() / 'snap/bitwarden/current/.bitwarden-ssh-agent.sock',
+                      home() / '.var/app/com.bitwarden.desktop/data/.bitwarden-ssh-agent.sock'))
+    return tuple(paths)
+
 def socket_path(backend='bitwarden'):
     sock = os.environ.get('SSH_AUTH_SOCK', '')
     if not sock:
@@ -144,10 +154,7 @@ def socket_path(backend='bitwarden'):
     if not path.is_absolute() or path.is_symlink():
         return None
     if backend == 'bitwarden':
-        allowed = {home() / '.bitwarden-ssh-agent.sock'}
-        if sys.platform == 'darwin':
-            allowed.add(home() / 'Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock')
-        if path not in allowed:
+        if path not in bitwarden_socket_paths():
             return None
     elif backend == 'apple-keychain':
         if sys.platform != 'darwin':
@@ -249,8 +256,11 @@ def register(args):
 def search(args):
     if args.doctor:
         return {'platform': sys.platform, 'backend': args.backend,
+                'bitwarden_desktop_executable': bool(shutil.which('bitwarden')),
                 'bitwarden_cli_installed': bool(shutil.which('bw')),
                 'keepassxc_installed': bool(shutil.which('keepassxc')),
+                'supported_agent_socket_paths': [str(path) for path in bitwarden_socket_paths()]
+                if args.backend == 'bitwarden' else [],
                 'selected_agent_socket': socket_path(args.backend) is not None,
                 'interactive_approval_ui': approval_available(),
                 'vault_ui_generation_required': True, 'tailscale_bootstrap': False}

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import stat
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -155,6 +156,37 @@ class LifecycleTests(unittest.TestCase):
                     self.assertEqual(mod.socket_path('apple-keychain'), path)
             with mock.patch.dict(os.environ, {'SSH_AUTH_SOCK': str(self.home / 'untrusted.sock')}):
                 self.assertIsNone(mod.socket_path('bitwarden'))
+
+    def test_bitwarden_linux_snap_and_flatpak_agent_paths(self):
+        if sys.platform != 'linux':
+            self.skipTest('Linux sandbox paths')
+        for rel in ('snap/bitwarden/current/.bitwarden-ssh-agent.sock',
+                    '.var/app/com.bitwarden.desktop/data/.bitwarden-ssh-agent.sock'):
+            with self.subTest(path=rel):
+                sock = self.home / rel
+                sock.parent.mkdir(parents=True, exist_ok=True)
+                with socket.socket(socket.AF_UNIX) as server:
+                    server.bind(str(sock))
+                    with mock.patch.dict(os.environ, {'SSH_AUTH_SOCK': str(sock)}):
+                        self.assertEqual(mod.socket_path('bitwarden'), sock)
+                sock.unlink()
+        sock = self.home / 'snap/another-app/current/.bitwarden-ssh-agent.sock'
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(sock))
+            with mock.patch.dict(os.environ, {'SSH_AUTH_SOCK': str(sock)}):
+                self.assertIsNone(mod.socket_path('bitwarden'))
+
+    def test_bitwarden_doctor_distinguishes_desktop_from_optional_cli(self):
+        with mock.patch.object(mod.shutil, 'which', side_effect=lambda cmd: '/snap/bin/bitwarden' if cmd == 'bitwarden' else None):
+            with mock.patch.dict(os.environ, {'SSH_AUTH_SOCK': ''}):
+                result = mod.search(SimpleNamespace(backend='bitwarden', doctor=True))
+        self.assertTrue(result['bitwarden_desktop_executable'])
+        self.assertFalse(result['bitwarden_cli_installed'])
+        self.assertFalse(result['selected_agent_socket'])
+        if sys.platform == 'linux':
+            self.assertIn(str(self.home / 'snap/bitwarden/current/.bitwarden-ssh-agent.sock'),
+                          result['supported_agent_socket_paths'])
 
     def test_keepassxc_uses_current_agent_not_vault_dump(self):
         args = SimpleNamespace(client='test', app='app', host='server', public_file=str(self.pubpath),
