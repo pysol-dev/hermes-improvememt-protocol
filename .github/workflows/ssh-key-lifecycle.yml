@@ -1,0 +1,34 @@
+name: SSH key lifecycle
+on:
+  push:
+    paths:
+      - 'ssh-key-lifecycle/**'
+      - '.github/workflows/ssh-key-lifecycle.yml'
+  pull_request:
+    paths:
+      - 'ssh-key-lifecycle/**'
+      - '.github/workflows/ssh-key-lifecycle.yml'
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unit tests
+        run: python3 -m unittest discover -s ssh-key-lifecycle/scripts -p 'test_*.py' -v
+      - name: Shell syntax
+        shell: bash
+        run: |
+          for file in ssh-key-lifecycle/scripts/*.sh; do bash -n "$file"; done
+      - name: macOS approval helper typecheck
+        if: runner.os == 'macOS'
+        run: swiftc -typecheck ssh-key-lifecycle/scripts/biometric-approve.swift

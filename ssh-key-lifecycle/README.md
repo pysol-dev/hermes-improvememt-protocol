@@ -1,0 +1,40 @@
+# ssh-key-lifecycle
+
+Hermes / Agent Skills-compatible public-key inventory and OpenSSH operations. This is the versioned source of `SKILL.md` and its scripts. Bitwarden is the default SSH agent backend; KeePassXC (an agent client using OpenSSH's agent) and macOS Keychain (passphrase for an encrypted local key) are opt-in. It never reads a vault item into model context.
+
+## Install into Hermes
+
+From a trusted clone, link this directory into the active profile's skills directory:
+
+```sh
+mkdir -p "$HOME/.hermes/skills/security"
+ln -s /absolute/path/to/hermes-improvememt-protocol/ssh-key-lifecycle "$HOME/.hermes/skills/security/ssh-key-lifecycle"
+```
+
+The installed path must be free first. Do not replace a customized skill without preserving it. Load it in a new Hermes session or use `/reload-skills` for slash-command discovery. For another agentskills.io client, link the same directory into its skill path; its code and metadata do not rely on Hermes runtime APIs.
+
+## Commands
+
+Run from the component directory:
+
+```sh
+scripts/key-search.sh --doctor --backend bitwarden
+scripts/key-register.sh client app host --backend bitwarden --public-file /home/you/.ssh/id_ed25519_client_app_host.pub --vault-ref item-id
+scripts/config-append.sh alias host.tailnet.example id_ed25519_client_app_host
+scripts/ssh-check.sh alias
+scripts/ssh-exec.sh alias -- hostname
+scripts/ssh-exec.sh alias -- printf '%s' 'a safe public argument'
+```
+
+`key-register.sh` accepts an existing public key offered by the selected agent; it does not generate a private key. The older `keygen.sh` remains a compatibility alias. SSH host keys must be independently verified and already trusted (`StrictHostKeyChecking=yes`). `ssh-exec.sh` requires two local approvals: a connection preflight and an exact-command approval. It returns only status and a command digest; remote stdout/stderr is discarded. Arguments are shell-quoted and bounded; obvious credential-looking arguments are rejected, but this check is heuristic, not a secret detector. Never embed credentials in SSH argv or the remote command. The command runs under the remote account's normal shell; approve it only when the displayed command and target match your intent.
+
+macOS uses a Swift LocalAuthentication helper for Touch ID on these skill operations; Linux uses Zenity for human GUI approval. Both deny if no interactive UI is available. The vendor's SSH signing prompt is a separate setting; verify per-request approval in the vault application. Nothing configures Tailscale ACLs or changes the remote host by default. `rotate.sh` and `ts-bootstrap.sh` are read-only plans until a tested secret-safe bootstrap and rollback exists.
+
+## Development and limits
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+for f in scripts/*.sh; do bash -n "$f"; done
+```
+
+CI runs the unit suite on Linux and macOS and typechecks the Swift approval helper on macOS. The tests mock GUI/vault/network boundaries; a passing test is not evidence of a live Touch ID prompt, a vault signature, or a provisioned tailnet device. The local Hermes `skills_guard` currently rates this SSH-specific source as caution from static-pattern matches; review findings before installing it through a community skill hub. See `references/security-and-setup.md` for backend differences and sources.
