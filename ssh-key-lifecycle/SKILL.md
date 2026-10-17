@@ -1,7 +1,7 @@
 ---
 name: ssh-key-lifecycle
 description: Use when managing SSH keys or provisioning tailnet SSH.
-version: 0.5.0
+version: 0.5.1
 author: patchWERKS
 license: MIT
 platforms: [macos, linux]
@@ -15,6 +15,11 @@ metadata:
 
 ## When to Use
 Use for standardized per-client/app/host public-key inventory, choosing an SSH authentication method, registering vault-backed keys, validated host config, OpenSSH connectivity checks, or tailnet provisioning plans. Bitwarden is the supported default; KeePassXC is supported through its SSH-agent integration, and macOS Keychain is an explicit local-file option. The broader M1–M12 matrix in `references/auth-methods.md` compares manual, Mac-only, and alternative methods without claiming they are implemented. Read `references/security-and-setup.md` when choosing a backend. Scripts operate out-of-process and return only public information.
+
+## Remote client control plane
+Hermes may run on a server while the user speaks from a Mac through Wave Terminal or SSH. Before asking the user to run local checks or suggesting A2A, determine where this terminal actually runs, then look for an existing authorized path **back to the Mac**. A Wave remote `wsh` may expose local-file bridging (`/~/`), but do not assume it can execute local commands. Inspect SSH Host aliases, the pinned host key and the authorized *public* fingerprint without reading private key bytes or dumping any server login-key file; verify the Unix login name instead of assuming the stored `User` is current. Test only a noninteractive, public-key, strict-host-key, no-agent-forwarding, no-control-master, read-only SSH command. Once authenticated, execute Mac-specific probes through that channel; a skill script running on the server is **not** running on the Mac. A2A is for independent agents, not a prerequisite to run OS commands over an existing SSH channel.
+
+For a cross-tailnet target, inspect Tailscale's active account and peer identity **on the Mac**, not on Hermes's server. Validate an exact supplied IP before lookup and do not connect to it until its peer identity is known: a shared device may have a remapped address. Do not switch the Mac's active tailnet profile if the current SSH/Wave control session depends on that profile unless a separate recovery route is tested. A membership invite, a second saved profile, and a shared-in device are different states; if the target is not visible, ask the owning admin about a device share or a safe alternate path instead of pretending the current tailnet can reach it. A socket file alone does not prove a vault SSH agent is running or that a biometric prompt will fire for every signature.
 
 ## Quick Reference
 From this skill directory:
