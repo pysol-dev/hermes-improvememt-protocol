@@ -59,8 +59,9 @@ class LifecycleTests(unittest.TestCase):
                 mod.check_host_config(existing, 'testhost')
 
     def test_denied_without_approval_ui_keeps_state_unchanged(self):
-        args = mock.Mock(client='test', app='app', host='server', public_file=str(self.pubpath), vault_ref='vault/item', backend='bitwarden')
+        args = SimpleNamespace(client='test', app='app', host='server', public_file=str(self.pubpath), vault_ref='vault/item', backend='bitwarden', auth_method=None)
         with mock.patch.object(mod, 'offered_fingerprints', return_value={self.fp}), \
+             mock.patch.object(mod, 'socket_path', return_value=self.home / '.bitwarden-ssh-agent.sock'), \
              mock.patch.object(mod, 'approval_available', return_value=False), self.assertRaises(mod.Denied):
             mod.register(args)
         self.assertFalse((self.state / 'ssh-keys.jsonl').exists())
@@ -68,7 +69,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse((self.home / '.ssh' / self.name).exists())
 
     def test_register_and_config_with_mocked_external_consent(self):
-        args = mock.Mock(client='test', app='app', host='server', public_file=str(self.pubpath), vault_ref='vault/item', backend='bitwarden')
+        args = SimpleNamespace(client='test', app='app', host='server', public_file=str(self.pubpath), vault_ref='vault/item', backend='bitwarden', auth_method=None)
         cfg = SimpleNamespace(alias='server', hostname='server.tailnet.ts.net', name=self.name)
         with mock.patch.object(mod, 'offered_fingerprints', return_value={self.fp}), \
              mock.patch.object(mod, 'approve', return_value=self.approval) as approved, \
@@ -98,6 +99,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((self.home / '.ssh/config').stat().st_mode), 0o600)
         entries = mod.registry(); self.assertEqual(len(entries), 2)
         self.assertEqual(entries[-1]['targets'], ['server'])
+        self.assertEqual(entries[-1]['auth_method'], 'M9')
+        self.assertTrue(entries[-1]['exportable'])
+        self.assertFalse(entries[-1]['mac_bound'])
+        self.assertEqual(entries[-1]['prompt_cadence'], 'vendor-configured')
+        self.assertIsNone(entries[-1]['control_persist'])
+        self.assertIsNone(entries[-1]['min_openssh_server'])
         audit = (self.state / 'ssh-audit.jsonl').read_text().splitlines()
         self.assertEqual(len(audit), 2)
         self.assertEqual([json.loads(x)['operation'] for x in audit], ['register-key', 'config-append'])
@@ -190,13 +197,14 @@ class LifecycleTests(unittest.TestCase):
 
     def test_keepassxc_uses_current_agent_not_vault_dump(self):
         args = SimpleNamespace(client='test', app='app', host='server', public_file=str(self.pubpath),
-                               vault_ref='entry-id', backend='keepassxc')
+                               vault_ref='entry-id', backend='keepassxc', auth_method='M2')
         cfg = SimpleNamespace(alias='server', hostname='server.tailnet.ts.net', name=self.name)
         with mock.patch.object(mod, 'offered_fingerprints', return_value={self.fp}), \
              mock.patch.object(mod, 'approve', return_value=self.approval), \
              mock.patch.object(mod, 'socket_path', return_value=self.home / 'agent.sock'):
             self.assertEqual(mod.register(args)['backend'], 'keepassxc')
             self.assertEqual(mod.configure(cfg)['status'], 'appended')
+        self.assertEqual(mod.active(mod.registry())[self.name]['auth_method'], 'M2')
         block = (self.home / '.ssh/config').read_text()
         self.assertIn('IdentityAgent SSH_AUTH_SOCK', block)
         self.assertIn('IdentityFile ' + str(self.pubpath), block)
@@ -213,13 +221,66 @@ class LifecycleTests(unittest.TestCase):
         private = self.home / '.ssh' / self.name
         private.write_text('fake private material'); private.chmod(0o600)
         args = SimpleNamespace(client='test', app='app', host='server', public_file=str(self.pubpath),
-                               vault_ref='keychain', backend='apple-keychain')
+                               vault_ref='keychain', backend='apple-keychain', auth_method='M4')
         with mock.patch.object(mod.sys, 'platform', 'darwin'), \
              mock.patch.object(mod, 'offered_fingerprints', return_value={self.fp}), \
+             mock.patch.object(mod, 'socket_path', return_value=self.home / 'agent.sock'), \
              mock.patch.object(mod.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
              mock.patch.object(mod, 'approve') as approve, self.assertRaises(mod.Denied):
             mod.register(args)
         approve.assert_not_called()
+        self.assertFalse((self.state / 'ssh-keys.jsonl').exists())
+
+    def test_auth_method_selection_is_nonmutating_and_exposes_only_supported_config(self):
+        args = SimpleNamespace(platform='darwin', multi_machine='yes', human_per_use='yes',
+                               existing_key='no', tailnet_ssh='no', reduce_prompts='yes', choose='M9')
+        value = mod.auth_method_select(args)
+        self.assertEqual(value['chosen_method'], 'M9')
+        self.assertEqual(value['recommended_method'], 'M9')
+        self.assertEqual({m['id'] for m in value['candidates']}, {'M1', 'M9'})
+        self.assertEqual(value['modifier_suggestion'], 'M10')
+        self.assertTrue(any('IdentityAgent' in line for line in value['required_config']))
+        self.assertTrue(any('ControlMaster no' in line for line in value['required_config']))
+        self.assertFalse(self.state.exists())
+
+    def test_auth_method_selection_rejects_mac_bound_portability_and_tailscale_ssh(self):
+        args = SimpleNamespace(platform='darwin', multi_machine='yes', human_per_use='yes',
+                               existing_key='no', tailnet_ssh='no', reduce_prompts='no', choose='M5')
+        with self.assertRaises(mod.Denied): mod.auth_method_select(args)
+        args.platform = 'linux'; args.multi_machine = 'no'; args.existing_key = 'yes'
+        args.tailnet_ssh = 'yes'; args.choose = 'M9'
+        with self.assertRaises(mod.Denied): mod.auth_method_select(args)
+        args.choose = 'M12'
+        result = mod.auth_method_select(args)
+        self.assertEqual([item['id'] for item in result['candidates']], ['M12'])
+        self.assertTrue(result['key_auth_inert_on_this_path'])
+
+    def test_selector_marks_research_and_unknown_transport_without_claiming_configuration(self):
+        args = SimpleNamespace(platform='darwin', multi_machine='no', human_per_use='yes',
+                               existing_key='yes', tailnet_ssh='unknown', reduce_prompts='no', choose='M8')
+        result = mod.auth_method_select(args)
+        self.assertEqual(result['chosen_method'], 'M8')
+        self.assertEqual(result['required_config'], [])
+        self.assertEqual(next(m['status'] for m in result['candidates'] if m['id'] == 'M8'), 'research-only')
+        self.assertTrue(any('Verify the target SSH auth method' in w for w in result['warnings']))
+        self.assertFalse(self.state.exists())
+
+    def test_search_reads_legacy_registry_without_attesting_a_prompt(self):
+        self.state.mkdir(parents=True, mode=0o700)
+        mod.append_event(self.state / 'ssh-keys.jsonl', {
+            'name': self.name, 'fingerprint': self.fp, 'comment': '', 'vault_ref': 'item',
+            'backend': 'bitwarden', 'path': str(self.pubpath), 'targets': [], 'status': 'active'})
+        with mock.patch.object(mod, 'offered_fingerprints', return_value=set()):
+            result = mod.search(SimpleNamespace(doctor=False, query='test'))
+        self.assertEqual(result[0]['auth_method'], 'M9')
+        self.assertEqual(result[0]['prompt_cadence'], 'unverified-legacy')
+
+    def test_registration_rejects_method_backend_mismatch_before_approval(self):
+        args = SimpleNamespace(client='test', app='app', host='server', public_file=str(self.pubpath),
+                               vault_ref='vault/item', backend='bitwarden', auth_method='M4')
+        with mock.patch.object(mod, 'approve') as approval, self.assertRaises(mod.Denied):
+            mod.register(args)
+        approval.assert_not_called()
         self.assertFalse((self.state / 'ssh-keys.jsonl').exists())
 
     def test_ssh_check_requires_publickey_and_redacts_diagnostics(self):

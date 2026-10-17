@@ -19,7 +19,8 @@ Run from the component directory:
 
 ```sh
 scripts/key-search.sh --doctor --backend bitwarden
-scripts/key-register.sh client app host --backend bitwarden --public-file /home/you/.ssh/id_ed25519_client_app_host.pub --vault-ref item-id
+scripts/auth-method-select.sh --platform linux --multi-machine yes --human-per-use yes --existing-key no --reduce-prompts no --tailnet-ssh no --choose M9
+scripts/key-register.sh client app host --backend bitwarden --auth-method M9 --public-file /home/you/.ssh/id_ed25519_client_app_host.pub --vault-ref item-id
 scripts/config-append.sh alias host.tailnet.example id_ed25519_client_app_host
 scripts/ssh-check.sh alias
 scripts/ssh-exec.sh alias -- hostname
@@ -27,6 +28,8 @@ scripts/ssh-exec.sh alias -- printf '%s' 'a safe public argument'
 ```
 
 `key-register.sh` accepts an existing public key offered by the selected agent; it does not generate a private key. The older `keygen.sh` remains a compatibility alias. SSH host keys must be independently verified and already trusted (`StrictHostKeyChecking=yes`). `ssh-exec.sh` requires two local approvals: a connection preflight and an exact-command approval. It returns only status and a command digest; remote stdout/stderr is discarded. Arguments are shell-quoted and bounded; obvious credential-looking arguments are rejected, but this check is heuristic, not a secret detector. Never embed credentials in SSH argv or the remote command. The command runs under the remote account's normal shell; approve it only when the displayed command and target match your intent.
+
+Choose an auth method **before** registration with `auth-method-select.sh`. Its M1–M12 matrix covers encrypted disk keys, OpenSSH agent/lock, Apple Keychain, Mac Secure Enclave CTK, Secretive, fssh (research-only), Bitwarden, multiplexing, a separate macOS approval gate, and Tailscale SSH check mode. The selector is read-only: it never generates a key or edits a Host block, and future/nonportable methods are explicitly labeled. Only M2 (KeePassXC), M4 (Apple Keychain), and M9 (Bitwarden) are registered by this version. Bitwarden's JSON vault export **includes SSH key items**; it is not a nonexportable hardware vault. ControlMaster remains disabled in managed SSH even when the planner mentions it as a prompt-frequency tradeoff. See `references/auth-methods.md` for corrections and source links.
 
 On Linux Snap, install the official Bitwarden desktop app (`sudo snap install bitwarden --channel=latest/stable`), connect its `password-manager-service` interface, and sign in personally. In Settings enable its SSH Agent and ask for authorization on every use. The documented socket is `~/snap/bitwarden/current/.bitwarden-ssh-agent.sock`; set `SSH_AUTH_SOCK` to that absolute path in the trusted session launching Hermes before using this skill. `key-search.sh --doctor` distinguishes an installed desktop executable from the optional `bw` CLI and will report the socket as unavailable until the agent has actually started. Do not put login credentials into a terminal or transcript. See the backend reference for native Linux, Flatpak, and macOS socket variants.
 

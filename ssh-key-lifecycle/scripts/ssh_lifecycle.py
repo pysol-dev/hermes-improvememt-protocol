@@ -26,6 +26,27 @@ SEGMENT = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 HOST = re.compile(r"[a-zA-Z0-9]+(?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?\Z")
 VAULT_REF = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}\Z")
 BACKENDS = ('bitwarden', 'keepassxc', 'apple-keychain')
+AUTH_METHOD_BY_BACKEND = {'bitwarden': 'M9', 'keepassxc': 'M2', 'apple-keychain': 'M4'}
+METHODS = {
+    'M1': {'label': 'encrypted passphrase key on disk', 'status': 'manual-only',
+           'backend': None, 'mac_bound': False, 'exportable': True},
+    'M2': {'label': 'KeePassXC key loaded into OpenSSH agent', 'status': 'supported',
+           'backend': 'keepassxc', 'mac_bound': False, 'exportable': True},
+    'M4': {'label': 'Apple Keychain passphrase for encrypted disk key', 'status': 'supported',
+           'backend': 'apple-keychain', 'mac_bound': False, 'exportable': True},
+    'M5': {'label': 'Secure Enclave CTK biometric', 'status': 'mac-verification-required',
+           'backend': None, 'mac_bound': True, 'exportable': False},
+    'M6': {'label': 'Secure Enclave CTK no biometric', 'status': 'mac-verification-required',
+           'backend': None, 'mac_bound': True, 'exportable': False},
+    'M7': {'label': 'Secretive Secure Enclave', 'status': 'external-review-required',
+           'backend': None, 'mac_bound': True, 'exportable': False},
+    'M8': {'label': 'fssh retrofit', 'status': 'research-only',
+           'backend': None, 'mac_bound': False, 'exportable': True},
+    'M9': {'label': 'Bitwarden SSH agent', 'status': 'supported',
+           'backend': 'bitwarden', 'mac_bound': False, 'exportable': True},
+    'M12': {'label': 'Tailscale SSH (check only if separately configured)', 'status': 'alternate-transport',
+            'backend': None, 'mac_bound': False, 'exportable': None},
+}
 APPROVAL_SWIFT = Path(__file__).with_name('biometric-approve.swift')
 
 class Denied(Exception):
@@ -214,12 +235,73 @@ def audit(operation, name, fp, approval, *, outcome='success', command_sha256=No
         event['command_sha256'] = command_sha256
     append_event(state_dir() / 'ssh-audit.jsonl', event)
 
+def auth_method_select(args):
+    """Public-only advisory selection; no key, vault, policy, config, or agent mutation."""
+    require(args.platform in ('darwin', 'linux'), 'only Linux and macOS are in scope')
+    require(all(getattr(args, field) in ('yes', 'no') for field in
+                ('multi_machine', 'human_per_use', 'existing_key', 'reduce_prompts')),
+            'explicit yes/no answers are required')
+    require(args.tailnet_ssh in ('yes', 'no', 'unknown'),
+            'tailnet SSH interception must be yes, no, or unknown')
+    mac = args.platform == 'darwin'
+    portable = args.multi_machine == 'yes'
+    existing = args.existing_key == 'yes'
+    interactive = args.human_per_use == 'yes'
+    warnings = []
+    if args.tailnet_ssh == 'yes':
+        candidates = ['M12']
+        warnings.append('Target intercepts tailnet port 22: SSH keys are not the auth method on that path. '
+                        'Tailscale SSH check is an ssh policy action in addition to network access policy.')
+    else:
+        if args.tailnet_ssh == 'unknown':
+            warnings.append('Verify the target SSH auth method before treating key selection as effective.')
+        candidates = ['M9', 'M1'] if interactive else ['M2']
+        if mac and interactive:
+            if not portable and not existing:
+                candidates.extend(('M5', 'M7'))
+            if existing:
+                candidates.append('M8')
+        if mac and not interactive:
+            candidates.append('M4')
+            if not portable and not existing:
+                candidates.append('M6')
+        if existing and 'M9' in candidates:
+            warnings.append('Existing key import into Bitwarden is a human GUI operation; never extract it via a model tool.')
+        if existing and 'M8' in candidates:
+            warnings.append('fssh is research-only; do not install, migrate, or endorse without a source and security review.')
+    modifier = 'M10' if args.reduce_prompts == 'yes' and args.tailnet_ssh != 'yes' else None
+    if modifier:
+        warnings.append('ControlMaster would collapse approval prompts. Skill-managed connections enforce '
+                        'ControlMaster no and ControlPath none; M10 is opt-in research, not active config.')
+    if mac and args.tailnet_ssh != 'yes':
+        warnings.append('M11 is an operation gate, not an SSH auth method; direct LocalAuthentication '
+                        'does not require pam_reattach, and neither proves per-signature approval.')
+    chosen = args.choose
+    require(chosen is None or chosen in candidates, 'chosen method is incompatible with answers or target transport')
+    configs = {
+        'M9': ['IdentityAgent <documented Bitwarden socket>', 'IdentitiesOnly yes',
+               'ControlMaster no', 'ControlPath none'],
+        'M2': ['IdentityAgent SSH_AUTH_SOCK', 'IdentitiesOnly yes',
+               'ControlMaster no', 'ControlPath none'],
+        'M4': ['IdentityAgent SSH_AUTH_SOCK', 'UseKeychain yes', 'AddKeysToAgent yes',
+               'IdentitiesOnly yes', 'ControlMaster no', 'ControlPath none'],
+    }
+    if chosen is not None and METHODS[chosen]['status'] != 'supported':
+        warnings.append('Chosen path is not implemented by skill scripts; instructions require human verification.')
+    return {'chosen_method': chosen, 'recommended_method': candidates[0],
+            'candidates': [{'id': method, **METHODS[method]} for method in candidates],
+            'required_config': configs.get(chosen, []),
+            'modifier_suggestion': modifier, 'key_auth_inert_on_this_path': args.tailnet_ssh == 'yes',
+            'warnings': warnings, 'read_only': True}
+
 def register(args):
     name = valid_name(args.client, args.app, args.host)
     expected = home() / '.ssh' / (name + '.pub')
     require(args.public_file is not None and args.vault_ref is not None,
             'generate the key in the selected vault UI, then supply --public-file, --vault-ref, and --backend')
     require(args.backend in BACKENDS, 'unsupported backend')
+    method = AUTH_METHOD_BY_BACKEND[args.backend]
+    require(args.auth_method in (None, method), 'auth method does not match selected backend')
     require(args.backend != 'apple-keychain' or sys.platform == 'darwin', 'Apple Keychain is macOS-only')
     require(VAULT_REF.fullmatch(args.vault_ref) is not None, 'vault ref must be an opaque, nonsecret identifier')
     require(Path(args.public_file).is_absolute() and Path(args.public_file) == expected,
@@ -227,6 +309,8 @@ def register(args):
     require(not expected.is_symlink(), 'public key may not be a symlink')
     check_regular(expected, 8192)
     fp, public, comment = parse_public(read_safe(expected))
+    agent_sock = socket_path(args.backend)
+    require(agent_sock is not None, 'selected SSH agent socket unavailable')
     require(fp in offered_fingerprints(args.backend), 'public key is not offered by the selected SSH agent')
     private_path = home() / '.ssh' / name
     if args.backend == 'apple-keychain':
@@ -243,9 +327,15 @@ def register(args):
     try:
         require(name not in active(registry()), 'key name already registered; never overwrite')
         consent = approve('register-key', name, fp)
+        cadence = {'M2': 'agent-lifetime-or-constraints', 'M4': 'keychain-or-agent-dependent',
+                   'M9': 'vendor-configured'}[method]
         row = {'name': name, 'fingerprint': fp, 'comment': comment, 'vault_ref': args.vault_ref,
                'backend': args.backend, 'path': str(expected), 'created_at': now(), 'rotated_from': None,
-               'targets': [], 'status': 'active'}
+               'targets': [], 'status': 'active', 'auth_method': method,
+               'prompt_cadence': cadence, 'exportable': True, 'mac_bound': False,
+               'provider_path': None, 'agent_socket': str(agent_sock)
+               if args.backend == 'bitwarden' else None,
+               'control_persist': None, 'min_openssh_server': None}
         append_event(state_dir() / 'ssh-keys.jsonl', row)
         audit('register-key', name, fp, consent)
         return {'path': str(expected), 'fingerprint': fp, 'public_key': public,
@@ -270,6 +360,8 @@ def search(args):
     return [{'name': row['name'], 'fingerprint': row['fingerprint'],
              'comment': row['comment'], 'vault_ref': row['vault_ref'],
              'backend': row.get('backend', 'bitwarden'), 'targets': row['targets'],
+             'auth_method': row.get('auth_method', AUTH_METHOD_BY_BACKEND.get(row.get('backend', 'bitwarden'))),
+             'prompt_cadence': row.get('prompt_cadence', 'unverified-legacy'),
              'agent_loaded': row['fingerprint'] in loaded.get(row.get('backend', 'bitwarden'), set())}
             for row in active(registry()).values() if args.query in row['name']]
 
@@ -523,6 +615,13 @@ def main():
     gen = sub.add_parser('register'); gen.add_argument('client'); gen.add_argument('app'); gen.add_argument('host')
     gen.add_argument('--public-file'); gen.add_argument('--vault-ref')
     gen.add_argument('--backend', choices=BACKENDS, default='bitwarden')
+    gen.add_argument('--auth-method', choices=('M2', 'M4', 'M9'))
+    selector = sub.add_parser('auth-method-select', help='read-only method guidance; never creates keys')
+    selector.add_argument('--platform', choices=('darwin', 'linux'), default=sys.platform)
+    for flag in ('multi-machine', 'human-per-use', 'existing-key', 'reduce-prompts'):
+        selector.add_argument('--' + flag, choices=('yes', 'no'), required=True)
+    selector.add_argument('--tailnet-ssh', choices=('yes', 'no', 'unknown'), required=True)
+    selector.add_argument('--choose', choices=tuple(METHODS))
     searcher = sub.add_parser('search'); searcher.add_argument('query', nargs='?', default=''); searcher.add_argument('--doctor', action='store_true')
     searcher.add_argument('--backend', choices=BACKENDS, default='bitwarden')
     config = sub.add_parser('config'); config.add_argument('alias'); config.add_argument('hostname'); config.add_argument('name')
@@ -538,7 +637,8 @@ def main():
             require(1 <= args.timeout <= 600, 'remote timeout must be 1-600 seconds')
             if args.command and args.command[0] == '--':
                 args.command.pop(0)
-        value = {'register': register, 'search': search, 'config': configure,
+        value = {'register': register, 'auth-method-select': auth_method_select,
+                 'search': search, 'config': configure,
                  'ssh-check': ssh_check, 'ssh-exec': ssh_exec,
                  'rotate': rotation_plan, 'bootstrap': bootstrap_plan}[args.cmd](args)
         print(json.dumps(value, sort_keys=True))
